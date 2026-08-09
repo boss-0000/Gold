@@ -1,0 +1,87 @@
+# Pila web completa (misma del cliente): nginx + php-fpm + worker + MySQL 8 + Redis.
+#
+#   cp .env.example .env         # editar DB_PASSWORD, DEMO_REPO_URL
+#   docker compose up -d --build # el servicio "init" migra y prepara todo
+#   -> abrir http://SERVIDOR/
+#
+# Los comandos de consola siguen disponibles:
+#   docker compose exec app php artisan demo:hammer --scenario=duplicate --mode=both
+#
+# Nota: APP_KEY lo genera "init" dentro del archivo .env montado (Laravel lo lee
+# del archivo en cada request). Las credenciales de BD se pasan por environment
+# para que tanto el script de init como Laravel las vean de forma consistente.
+
+x-app-env: &app-env
+  DB_HOST: db
+  DB_PORT: 3306
+  DB_DATABASE: ${DB_DATABASE:-recharge}
+  DB_USERNAME: root
+  DB_PASSWORD: ${DB_PASSWORD:-root}
+  REDIS_HOST: redis
+
+services:
+  db:
+    image: mysql:8
+    command: --default-authentication-plugin=caching_sha2_password
+    environment:
+      MYSQL_DATABASE: ${DB_DATABASE:-recharge}
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD:-root}
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-p${DB_PASSWORD:-root}"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - db-data:/var/lib/mysql
+
+  redis:
+    image: redis:7-alpine
+
+  # Una sola pasada: composer install + key:generate + migrate. Los demás esperan.
+  init:
+    build: .
+    environment: *app-env
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - .:/var/www
+    command: sh docker/entrypoint.sh
+    restart: "no"
+
+  app:
+    build: .
+    environment: *app-env
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    volumes:
+      - .:/var/www
+    command: php-fpm
+
+  web:
+    image: nginx:alpine
+    depends_on:
+      - app
+    # Puerto del host configurable (WEB_PORT). En un VPS que ya usa el 80,
+    # ponga uno libre en .env (p. ej. WEB_PORT=8090). Para exponerlo sólo al
+    # proxy inverso local, use "127.0.0.1:${WEB_PORT:-80}:80".
+    ports:
+      - "${WEB_PORT:-80}:80"
+    volumes:
+      - ./docker/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - .:/var/www:ro
+
+  # Procesa las corridas disparadas desde la web (cola "demo").
+  worker:
+    build: .
+    environment: *app-env
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    volumes:
+      - .:/var/www
+    command: php artisan queue:work --queue=demo --sleep=1 --tries=1 --timeout=300
+
+volumes:
+  db-data:

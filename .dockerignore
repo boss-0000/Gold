@@ -1,0 +1,8 @@
+.git
+.gitignore
+node_modules
+vendor
+.env
+storage/logs/*.log
+tests
+run-demo.ps1
